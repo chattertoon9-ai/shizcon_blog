@@ -1,0 +1,6 @@
+{
+  "name": "BytePulse AI Studio - Gemini & Blogger Publisher",
+  "description": "Generate high-impact articles, health tips, and Sindh Board Class 1–12 textbook notes, solved exercises, MCQs, and images using Gemini 3.8 Flash, publishing directly to Google Blogger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
