@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "shizcon-education-studio",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -15,6 +15,7 @@
     "@google/genai": "^2.32.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
@@ -24,6 +25,7 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
