@@ -23,10 +23,8 @@ import {
   FileDown,
   Image as ImageIcon,
   GraduationCap,
-  HeartPulse,
   Trash2,
   Search,
-  Newspaper,
 } from 'lucide-react';
 import { GeneratedArticle, BloggerPublishResult, BloggerSettings } from '../types';
 import { generateArticleMarkdown } from '../utils/htmlToMarkdown';
@@ -90,7 +88,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
         </div>
         <h3 className="text-lg font-bold text-white mb-2">No Article Generated Yet</h3>
         <p className="text-xs sm:text-sm text-slate-400 max-w-md mb-6 leading-relaxed">
-          Select or enter a news angle on the left, then click <strong>"Generate Article for Blogger"</strong> to create a ready-to-publish post with Gemini 3.8 Flash.
+          Select a class, subject and chapter on the left, then click <strong>"Generate Class Notes & Post"</strong> to create ready-to-publish Sindh Board notes with Gemini 3.8 Flash.
         </p>
 
         <button
@@ -158,7 +156,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
       .replace(/[^a-z0-9]+/gi, '-')
       .replace(/^-+|-+$/g, '')
       .toLowerCase();
-    a.download = `${sanitizedTitle || 'bytepulse-post'}.md`;
+    a.download = `${sanitizedTitle || 'shizcon-education-post'}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -518,28 +516,10 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
             {/* Blogger Header Simulation */}
             <div className="bg-gradient-to-r from-slate-100 to-slate-50 border-b border-slate-200 px-6 py-4">
               <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
-                {article.category === 'news' || article.newsMeta ? (
-                  <span className="font-bold text-red-600 uppercase tracking-wider flex items-center gap-1.5">
-                    <Newspaper className="w-4 h-4 text-red-600" />
-                    {article.newsMeta?.outlet || 'Dawn News'}
-                    {article.newsMeta?.language ? ` • ${article.newsMeta.language}` : ''}
-                    {article.newsMeta?.datelineCity ? ` • ${article.newsMeta.datelineCity}` : ''}
-                  </span>
-                ) : article.category === 'sindh_board' || article.sindhBoardMeta ? (
-                  <span className="font-bold text-amber-700 uppercase tracking-wider flex items-center gap-1.5">
-                    <GraduationCap className="w-4 h-4 text-amber-600" />
-                    Sindh Textbook Board (STBB) {article.sindhBoardMeta?.classLevel ? `• Class ${article.sindhBoardMeta.classLevel}` : ''}
-                  </span>
-                ) : article.category === 'health' ? (
-                  <span className="font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
-                    <HeartPulse className="w-4 h-4 text-emerald-600" />
-                    BytePulse Health & Wellness
-                  </span>
-                ) : (
-                  <span className="font-semibold text-blue-600 uppercase tracking-wider">
-                    BytePulse News & Tech Update
-                  </span>
-                )}
+                <span className="font-bold text-amber-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <GraduationCap className="w-4 h-4 text-amber-600" />
+                  Sindh Textbook Board (STBB) {article.sindhBoardMeta?.classLevel ? `• Class ${article.sindhBoardMeta.classLevel}` : ''}
+                </span>
                 <span className="flex items-center gap-1">
                   <Calendar className="w-3.5 h-3.5 text-slate-400" />
                   {new Date(article.createdAt).toLocaleDateString(undefined, {
@@ -551,15 +531,15 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
               </div>
               <h1
                 className="text-xl sm:text-2xl font-extrabold text-slate-900 leading-snug"
-                dir={article.newsMeta?.isRTL ? 'rtl' : 'ltr'}
+                dir="ltr"
               >
                 {article.title}
               </h1>
               <div className="flex items-center flex-wrap gap-2 mt-3 pt-3 border-t border-slate-200/80 text-xs text-slate-600">
                 <div className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-[10px]">
-                  BP
+                  SE
                 </div>
-                <span>By BytePulse Editorial Team</span>
+                <span>By Shizcon Education Studio</span>
                 <span className="text-slate-300">•</span>
                 <span className="text-slate-600 font-medium flex items-center gap-1">
                   <Clock className="w-3.5 h-3.5 text-amber-600" />
@@ -576,7 +556,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
               <div className="pb-4 mb-4 border-b border-slate-100 space-y-2">
                 <div
                   className="text-sm sm:text-base font-medium text-slate-700 italic"
-                  dir={article.newsMeta?.isRTL ? 'rtl' : 'ltr'}
+                  dir="ltr"
                 >
                   {article.summary}
                 </div>
@@ -587,7 +567,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
                     </span>
                     <span
                       className="text-xs leading-relaxed text-slate-600 font-mono"
-                      dir={article.newsMeta?.isRTL ? 'rtl' : 'ltr'}
+                      dir="ltr"
                     >
                       {article.seoMetaDescription}
                     </span>
@@ -597,7 +577,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
 
               <div
                 dangerouslySetInnerHTML={{ __html: article.htmlContent }}
-                dir={article.newsMeta?.isRTL ? 'rtl' : 'ltr'}
+                dir="ltr"
                 className="space-y-4 text-slate-800 leading-relaxed text-sm sm:text-base"
               />
             </div>
@@ -685,7 +665,7 @@ export const ArticlePreview: React.FC<ArticlePreviewProps> = ({
             <div className="text-slate-400 pb-2 border-b border-slate-800 flex items-center justify-between">
               <span className="flex items-center gap-1.5 text-cyan-400">
                 <Terminal className="w-4 h-4" />
-                Execution & Retry Telemetry (Python Script Equivalent)
+                Execution & Retry Telemetry
               </span>
               <span className="text-[11px] text-slate-500">
                 Duration: {(article.totalDurationMs / 1000).toFixed(2)}s
