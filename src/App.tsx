@@ -3,10 +3,9 @@ import { Header } from './components/Header';
 import { GenerationPanel } from './components/GenerationPanel';
 import { ArticlePreview } from './components/ArticlePreview';
 import { SettingsModal } from './components/SettingsModal';
-import { PythonScriptModal } from './components/PythonScriptModal';
 import { HistoryView } from './components/HistoryView';
 import { GenerationConfig, GeneratedArticle, BloggerPublishResult, BloggerSettings } from './types';
-import { Sparkles, Terminal, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Sparkles, AlertTriangle } from 'lucide-react';
 
 const DEFAULT_CONFIG: GenerationConfig = {
   angle: 'Sindh Board Class 10 Physics - Chapter 10: Simple Harmonic Motion and Waves | Comprehensive Chapter Notes, Solved Numericals & MCQs (Sindh Textbook Board Jamshoro - English Medium)',
@@ -15,7 +14,6 @@ const DEFAULT_CONFIG: GenerationConfig = {
   targetWordCount: 900,
   includeKeyTakeaways: true,
   includeCodeExample: false,
-  includeHealthDisclaimer: false,
   includeImages: true,
   includeTableOfContents: true,
   seoMetaDescription: '',
@@ -43,8 +41,10 @@ const DEFAULT_BLOGGER_SETTINGS: BloggerSettings = {
 export default function App() {
   const [config, setConfig] = useState<GenerationConfig>(() => {
     try {
-      const saved = localStorage.getItem('bytepulse_config');
-      return saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : DEFAULT_CONFIG;
+      const saved = localStorage.getItem('shizcon_education_config');
+      if (!saved) return DEFAULT_CONFIG;
+      // Force education-only: ignore any previously saved non-education category.
+      return { ...DEFAULT_CONFIG, ...JSON.parse(saved), category: 'sindh_board' };
     } catch {
       return DEFAULT_CONFIG;
     }
@@ -52,7 +52,7 @@ export default function App() {
 
   const [bloggerSettings, setBloggerSettings] = useState<BloggerSettings>(() => {
     try {
-      const saved = localStorage.getItem('bytepulse_blogger_settings');
+      const saved = localStorage.getItem('shizcon_education_blogger_settings');
       return saved ? JSON.parse(saved) : DEFAULT_BLOGGER_SETTINGS;
     } catch {
       return DEFAULT_BLOGGER_SETTINGS;
@@ -61,7 +61,7 @@ export default function App() {
 
   const [history, setHistory] = useState<GeneratedArticle[]>(() => {
     try {
-      const saved = localStorage.getItem('bytepulse_history');
+      const saved = localStorage.getItem('shizcon_education_history');
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -69,13 +69,14 @@ export default function App() {
   });
 
   const [activeArticle, setActiveArticle] = useState<GeneratedArticle | null>(null);
-  const [activeView, setActiveView] = useState<'studio' | 'history' | 'python' | 'settings'>('studio');
+  const [activeView, setActiveView] = useState<'studio' | 'history' | 'settings'>('studio');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [activeAttempt, setActiveAttempt] = useState<number>(1);
   const [currentSleepRemaining, setCurrentSleepRemaining] = useState<number>(0);
   const [publishResult, setPublishResult] = useState<BloggerPublishResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [serverReachable, setServerReachable] = useState<boolean>(true);
   const [serverConfig, setServerConfig] = useState<{
     hasGeminiApiKey: boolean;
     envBlogId: string | null;
@@ -89,7 +90,7 @@ export default function App() {
   // Sync to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('bytepulse_config', JSON.stringify(config));
+      localStorage.setItem('shizcon_education_config', JSON.stringify(config));
     } catch (e) {
       console.warn('Failed to save config:', e);
     }
@@ -97,7 +98,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('bytepulse_blogger_settings', JSON.stringify(bloggerSettings));
+      localStorage.setItem('shizcon_education_blogger_settings', JSON.stringify(bloggerSettings));
     } catch (e) {
       console.warn('Failed to save blogger settings:', e);
     }
@@ -105,7 +106,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('bytepulse_history', JSON.stringify(history));
+      localStorage.setItem('shizcon_education_history', JSON.stringify(history));
     } catch (e) {
       console.warn('Failed to save history:', e);
     }
@@ -114,14 +115,23 @@ export default function App() {
   // Load server config on initial mount
   useEffect(() => {
     fetch('/api/config')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error('Server config unavailable');
+        return res.json();
+      })
       .then((data) => {
+        setServerReachable(true);
         setServerConfig(data);
         if (data.envBlogId && !bloggerSettings.blogId) {
           setBloggerSettings((prev) => ({ ...prev, blogId: data.envBlogId }));
         }
       })
-      .catch((err) => console.warn('Could not fetch server config:', err));
+      .catch((err) => {
+        // The Express server is not running (e.g. static hosting): AI generation
+        // and Blogger publishing need the local Node server.
+        setServerReachable(false);
+        console.warn('Could not fetch server config:', err);
+      });
   }, []);
 
   // Set latest article from history if available and not yet set
@@ -139,7 +149,7 @@ export default function App() {
     setCurrentSleepRemaining(0);
 
     try {
-      const res = await fetch('/api/generate-news', {
+      const res = await fetch('/api/generate-education-article', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
@@ -165,12 +175,6 @@ export default function App() {
           subject: config.sindhBoardConfig.subject,
           medium: config.sindhBoardConfig.medium,
           contentType: config.sindhBoardConfig.contentType,
-        } : undefined),
-        newsMeta: data.newsMeta || (config.newsConfig ? {
-          outlet: config.newsConfig.outlet,
-          language: config.newsConfig.language,
-          newsType: config.newsConfig.newsType,
-          isRTL: config.newsConfig.language === 'Urdu' || config.newsConfig.language === 'Sindhi' || config.newsConfig.language === 'Arabic',
         } : undefined),
         model: data.model || 'gemini-3.8-flash',
         createdAt: new Date().toISOString(),
@@ -247,6 +251,17 @@ export default function App() {
         serverHasLiveCreds={serverConfig.hasOAuthCreds}
       />
 
+      {/* Static-hosting notice: the Express server cannot run on GitHub Pages */}
+      {!serverReachable && (
+        <div className="bg-amber-950/90 border-b border-amber-800 px-4 py-2.5 text-xs text-amber-200 flex items-center justify-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>
+            Static preview: the local server is not running, so AI generation and Blogger publishing are unavailable here.
+            Run the Node server locally (<span className="font-mono">npm run dev</span>) to generate and publish.
+          </span>
+        </div>
+      )}
+
       {/* Global Error Notification */}
       {errorMessage && (
         <div className="bg-rose-950/90 border-b border-rose-800 px-4 py-2.5 text-xs text-rose-200 flex items-center justify-between">
@@ -304,7 +319,7 @@ export default function App() {
             }}
             onClearHistory={() => {
               setHistory([]);
-              localStorage.removeItem('bytepulse_history');
+              localStorage.removeItem('shizcon_education_history');
             }}
             onDeleteArticle={(id) => {
               setHistory((prev) => prev.filter((a) => a.id !== id));
@@ -312,14 +327,6 @@ export default function App() {
                 setActiveArticle(null);
               }
             }}
-          />
-        )}
-
-        {activeView === 'python' && (
-          <PythonScriptModal
-            config={config}
-            settings={bloggerSettings}
-            onClose={() => setActiveView('studio')}
           />
         )}
 
@@ -336,7 +343,7 @@ export default function App() {
       {/* Subtle Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 py-3 px-6 text-center text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between max-w-7xl mx-auto w-full gap-2">
         <div className="flex items-center gap-1.5">
-          <span>BytePulse AI News Studio</span>
+          <span>Shizcon Education Studio</span>
           <span>•</span>
           <span className="font-mono text-cyan-400">gemini-3.8-flash</span>
           <span>•</span>
