@@ -1,606 +1,496 @@
+// Simple, robust Express server that acts as a bridge between the
+// React client and the Gemini 3.8 Flash API, plus Google Blogger v3 API.
+// Education only: generates Sindh Board Class 1–12 chapter notes,
+// solved exercises, MCQs and model papers and publishes them to Blogger.
+//
+// NOTE: this server is for LOCAL use only. GitHub Pages is static hosting
+// and cannot run this Express server, so article generation and Blogger
+// publishing do not work on the deployed static site — the UI shows a
+// static-hosting notice in that case.
 import express from 'express';
 import dotenv from 'dotenv';
+import cors from 'cors';
+import crypto from 'crypto';
+import https from 'https';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
-import { getFeaturedImageUrl, formatBloggerImageHtml } from './src/utils/imageHelper.ts';
-import { sanitizeJsonWithLatex, renderMathFormulas, injectTableOfContents } from './src/utils/contentFormatter.ts';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = process.env.PORT || 3001;
 
-app.use(express.json({ limit: '10mb' }));
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
 
-// Server-side Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// --- Load environment variables ---
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const DEFAULT_BLOGGER_BLOG_ID = process.env.BLOGGER_BLOG_ID || '';
+const DEFAULT_BLOGGER_ACCESS_TOKEN = process.env.BLOGGER_ACCESS_TOKEN || '';
+const DEFAULT_BLOGGER_CLIENT_ID = process.env.BLOGGER_CLIENT_ID || '';
+const DEFAULT_BLOGGER_CLIENT_SECRET = process.env.BLOGGER_CLIENT_SECRET || '';
+const DEFAULT_BLOGGER_REFRESH_TOKEN = process.env.BLOGGER_REFRESH_TOKEN || '';
 
-interface GenerateRequest {
+// --- Types ---
+interface GenerationConfig {
+  category: string;
   angle: string;
-  tone?: string;
-  targetWordCount?: number;
-  includeKeyTakeaways?: boolean;
-  includeCodeExample?: boolean;
+  tone: string;
+  targetWordCount: number;
+  maxRetries: number;
+  backoffFactor: number;
+  includeKeyTakeaways: boolean;
+  includeTableOfContents: boolean;
+  includeImages: boolean;
+  imageUrl?: string;
+  seoMetaDescription?: string;
   customPromptExtra?: string;
-  maxRetries?: number;
-  backoffFactor?: number;
+  includeCodeExample: boolean;
+  sindhBoardConfig?: {
+    classLevel: string;
+    subject: string;
+    stream?: string;
+    contentType: 'notes' | 'solved_exercises' | 'mcqs' | 'model_paper' | 'book_summary';
+    medium: 'English' | 'Urdu' | 'Sindhi';
+    chapterOrTopic: string;
+  };
 }
 
-interface AttemptLog {
-  attempt: number;
-  timestamp: string;
-  status: 'started' | 'success' | 'failed' | 'retry_wait';
-  message: string;
-  durationMs?: number;
-  sleepTimeSeconds?: number;
+// --- Gemini URL Helper ---
+function getGeminiApiUrl(model: string): string {
+  const safeModel = model && model.trim() !== '' ? model.trim() : 'gemini-3.8-flash';
+  return `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent`;
 }
 
-// Helper to delay execution
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Helper to exchange refresh token for access token
-async function getAccessTokenFromRefreshToken(
-  clientId: string,
-  clientSecret: string,
-  refreshToken: string
-): Promise<string> {
-  const tokenUrl = 'https://oauth2.googleapis.com/token';
-  const params = new URLSearchParams({
+// --- Blogger Token Helper (OAuth 2.0) ---
+async function refreshBloggerToken(clientId: string, clientSecret: string, refreshToken: string): Promise<string> {
+  const payload = JSON.stringify({
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
   });
-
-  const response = await fetch(tokenUrl, {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
   });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`OAuth token exchange failed (${response.status}): ${errorBody}`);
+  const data = await res.json();
+  if (!res.ok || !data.access_token) {
+    throw new Error(`OAuth token refresh failed: ${data.error || data.error_description || res.statusText}`);
   }
-
-  const data = (await response.json()) as { access_token: string };
   return data.access_token;
 }
 
-// API: System Configuration Status
-app.get('/api/config', (req, res) => {
-  res.json({
-    hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
-    envBlogId: process.env.BLOG_ID ? process.env.BLOG_ID : null,
-    hasOAuthCreds: Boolean(
-      process.env.CLIENT_ID && process.env.CLIENT_SECRET && process.env.REFRESH_TOKEN
-    ),
-    defaultModel: 'gemini-3.8-flash',
-  });
-});
-
-// API: Generate News Post with smart retry and exponential backoff
-app.post('/api/generate-news', async (req, res) => {
-  const {
-    angle = '10 Actionable Daily Health Habits That Supercharge Cellular Energy, Mental Clarity, and Immunity',
-    category = 'sindh_board',
-    tone = 'educational',
-    targetWordCount = 900,
-    includeKeyTakeaways = true,
-    includeCodeExample = false,
-    includeHealthDisclaimer = true,
-    includeImages = true,
-    includeTableOfContents = true,
-    seoMetaDescription: userProvidedSeoDescription,
-    imageUrl: userProvidedImageUrl,
-    sindhBoardConfig,
-    newsConfig,
-    customPromptExtra = '',
-    maxRetries = 5,
-    backoffFactor = 4,
-  } = req.body as any;
-
-  const modelName = 'gemini-3.8-flash';
-  const logs: AttemptLog[] = [];
-  const startTime = Date.now();
-
-  const isNews =
-    category === 'news' ||
-    Boolean(newsConfig) ||
-    /dawn|thenews|the news|aaj news|aaj tv|ktn|sindh tv|kawish|awami awaz|geo news|ary news|express news|al jazeera|bulletin|breaking news|نیوز|خبرون|الأخبار/i.test(
-      angle
-    );
-
-  const isSindhBoard =
-    !isNews &&
-    (category === 'sindh_board' ||
-      Boolean(sindhBoardConfig) ||
-      /sindh|stbb|jamshoro|karachi board|bsek|biek|class\s*(?:[1-9]|1[0-2])|matric|intermediate|fsc|inter|pre-medical|pre-engineering/i.test(
-        angle
-      ));
-
-  const isHealthTopic =
-    !isNews &&
-    !isSindhBoard &&
-    (category === 'health' ||
-      /health|wellness|nutrition|diet|sleep|fitness|medical|disease|symptom|doctor|mental|stress|anxiety|gut|cardio|immunity|metabolism|ergonomics|habit|hypertension|diabetes|fatigue|hormone/i.test(
-        angle
-      ));
-
-  const newsOutlet = newsConfig?.outlet || (/dawn/i.test(angle) ? 'Dawn News' : /the news/i.test(angle) ? 'The News International' : /aaj/i.test(angle) ? 'Aaj News' : /ktn|sindh tv|kawish|awami|سنڌ/i.test(angle) ? 'Sindhi Channel News (KTN / Sindh TV / Kawish)' : /arabic|al jazeera|العربية|الجزيرة/i.test(angle) ? 'Al Jazeera / Arabic News' : 'News Desk Wire');
-  const newsLanguage = newsConfig?.language || (/sindhi|سنڌي/i.test(angle) ? 'Sindhi' : /urdu|اردو/i.test(angle) ? 'Urdu' : /arabic|عربي|العربية/i.test(angle) ? 'Arabic' : 'English');
-  const isRTL = newsLanguage === 'Urdu' || newsLanguage === 'Sindhi' || newsLanguage === 'Arabic';
-
-  const addLog = (log: Omit<AttemptLog, 'timestamp'>) => {
-    logs.push({
-      ...log,
-      timestamp: new Date().toLocaleTimeString(),
-    });
-  };
-
-  const domainLabel = isNews
-    ? `News (${newsOutlet} • ${newsLanguage})`
-    : isSindhBoard
-    ? 'Sindh Board (STBB Class 1-12) Education'
-    : isHealthTopic
-    ? 'Health & Wellness'
-    : 'Tech & Software';
-
-  addLog({
-    attempt: 1,
-    status: 'started',
-    message: `Initiating article generation with model: ${modelName} (${domainLabel}) for: "${angle.slice(0, 70)}${angle.length > 70 ? '...' : ''}"`,
-  });
-
-  let rawGeneratedText: string | null = null;
-  let successfulAttempt = 0;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const attemptStart = Date.now();
-    try {
-      addLog({
-        attempt,
-        status: 'started',
-        message: `Attempt ${attempt}/${maxRetries}: Querying ${modelName}...`,
-      });
-
-      let personaPrompt = '';
-      let specificRequirements = '';
-
-      if (isNews) {
-        personaPrompt = `You are an acclaimed senior journalist, special correspondent, and news desk editor at ${newsOutlet}.
-Your assignment is to write a comprehensive, timely, verified, and high-impact news story or analysis formatted for Google Blogger.
-Reporting Language: ${newsLanguage} (${isRTL ? 'Right-to-Left RTL script' : 'English'}).`;
-
-        specificRequirements = `- Structure for ${newsOutlet} News Report (${newsLanguage}):
-  1. Journalistic Headline: Clear, urgent, and accurate news headline in ${newsLanguage} without quotation marks.
-  2. News Dateline: Open the first paragraph with an authentic news bureau dateline in ${newsLanguage} (e.g. ${
-    newsLanguage === 'Urdu' ? '"اسلام آباد / کراچی (نیوز ڈیسک) —"' :
-    newsLanguage === 'Sindhi' ? '"ڪراچي / حيدرآباد (خاص نمائندو / نيوز ڊيسڪ) —"' :
-    newsLanguage === 'Arabic' ? '"إسلام آباد / الرياض (غرفة الأخبار) —"' :
-    '"ISLAMABAD / KARACHI (News Desk) —"'
-  }).
-  3. Lead Paragraph: Crisp inverted pyramid format answering Who, What, When, Where, Why, and How.
-  4. Story Body: Subheadings with <h2> and <h3>, key details, official statements, quotes, or ministerial announcements.
-  5. Context & Significance: Background context, public impact, and economic or regional implications.
-  6. Highlights Callout: "Key Highlights / اہم نکات / اهم نقطا / أبرز النقاط" box inside <blockquote>.
-  7. Forward Outlook: Upcoming cabinet/court proceedings, inquiry details, or public reaction.
-  ${isRTL ? `- CRITICAL RTL STYLING: Wrap the entire article body in <div dir="rtl" style="direction: rtl; text-align: right; font-family: 'Noto Nastaliq Urdu', 'Noto Naskh Arabic', Arial, sans-serif; line-height: 2;">...</div> so that ${newsLanguage} script renders natively with correct alignment and spacing.` : ''}
-  - Write entirely, naturally, and fluently in ${newsLanguage}.`;
-      } else if (isSindhBoard) {
-        const cls = sindhBoardConfig?.classLevel ? `Class ${sindhBoardConfig.classLevel}` : 'Sindh Board';
-        const subj = sindhBoardConfig?.subject || 'Subject';
-        const cType = sindhBoardConfig?.contentType || 'Comprehensive Notes & Solved Exercises';
-        const med = sindhBoardConfig?.medium || 'English';
-
-        personaPrompt = `You are an acclaimed educational author, curriculum specialist, and senior paper setter for the Sindh Textbook Board (STBB Jamshoro / BSEK Karachi / BIEK Karachi and all Sindh Boards).
-Your objective is to produce comprehensive, accurate, high-scoring, and syllabus-aligned educational content for students and teachers publishing on Google Blogger.
-Target: ${cls} - ${subj} (${med} Medium).`;
-
-        specificRequirements = `- Structure for Sindh Board Education Content:
-  1. Catchy, SEO-optimized Title format: "[Class & Subject]: [Chapter / Topic Name] Complete Notes, Solved Questions & Book Summary - Sindh Board STBB".
-  2. Student Overview: Introduction to the chapter, board exam weightage, and core learning competencies.
-  3. Detailed Conceptual Theory: In-depth explanations, formulas, scientific laws, definitions, or literary summaries using <h2> and <h3> subheadings.
-  4. Solved Textbook Exercise Questions:
-     - Short Answer Questions (مختصر سوالات) with point-to-point answers.
-     - Long Descriptive Questions (تفصیلی سوالات) with derivations, principles, or detailed explanations.
-  5. Solved Numerical Problems (if Physics, Chemistry, Math, Commerce) with clear step-by-step working and units.
-  6. High-Yield Multiple Choice Questions (MCQs) with correct answers and brief explanations.
-  7. "Board Exam Preparation Tips & FAQs" highlighted box inside <blockquote>.
-  8. Textbook Summary & PDF study guidelines.
-  ${med === 'Urdu' ? '- Write primarily in clear, beautiful Urdu with English technical terms in brackets.' : ''}
-  ${med === 'Sindhi' ? '- Write in clear, authentic Sindhi with English technical terms in brackets.' : ''}`;
-      } else if (isHealthTopic) {
-        personaPrompt = `You are an acclaimed health, wellness, and medical science journalist for BytePulse Health & Wellness. Your mission is to provide evidence-based, empathetic, actionable, and engaging health articles, daily wellness tips, and clear breakdowns of common health issues for Google Blogger readers.`;
-
-        specificRequirements = `- Structure for Health Content:
-  1. Catchy, trustworthy, and engaging headline that inspires positive action without fear-mongering.
-  2. Engaging introduction explaining the significance of this health issue or wellness goal today.
-  3. Root causes, physiological explanations, or mechanisms explained in accessible, clear language using <h2> and <h3> subheadings.
-  4. "Actionable Health Tips": 3 to 5 realistic, evidence-backed lifestyle, dietary, or daily routine recommendations.
-  5. Warning signs, symptoms, or indicators to be mindful of.
-  ${includeKeyTakeaways ? '6. "Key Health Takeaways & Quick Action Plan" highlight box inside <blockquote>.' : ''}
-  ${includeHealthDisclaimer ? '7. A standard medical disclaimer callout at the end: "<em>Disclaimer: This article is for informational purposes only and is not medical advice. Always consult a qualified healthcare professional with any questions regarding health conditions.</em>"' : ''}`;
-      } else {
-        personaPrompt = `You are a premier tech and software engineering journalist for BytePulse, creating engaging, authoritative, and well-structured news and instructional posts for Google Blogger.`;
-
-        specificRequirements = `- Structure for Tech Content:
-  1. Catchy, engaging title (punchy and SEO-friendly).
-  2. Short hook / intro paragraph summarizing why this matters today.
-  3. Key sections with subheadings (use standard <h2> and <h3> tags).
-  ${includeKeyTakeaways ? '4. "Key Takeaways" bullet points highlight box.' : ''}
-  ${includeCodeExample ? '5. Practical code snippet or architectural diagram description with explanation inside <pre><code>.' : ''}
-  6. Forward-looking conclusion / call to action.`;
-      }
-
-      const prompt = `${personaPrompt}
-
-Topic / Angle:
-"${angle}"
-
-Style and Requirements:
-- Tone: ${tone} (crisp, authoritative, student/reader friendly, and highly engaging).
-- Target length: approximately ${targetWordCount} words.
-${specificRequirements}
-- Format the content in clean HTML suitable for direct Google Blogger publishing:
-  - Wrap paragraphs in <p> tags.
-  - Subheadings in <h2> or <h3> (include id="section-name" attributes for anchor navigation).
-  ${includeTableOfContents ? '- Table of Contents: Include a styled Table of Contents box (<div class="table-of-contents">...</div>) near the beginning linking to each section with matching anchor IDs.' : ''}
-  - Highlighted callouts inside <blockquote> tags.
-  - Lists inside <ul><li>...</li></ul> or <ol><li>...</li></ol>.
-  - Tables for comparisons/formulas if helpful: <table border="1">...</table>.
-  - Mathematical & Chemical Formulas (CRITICAL): Never output raw LaTeX syntax with unescaped backslashes (such as $$\\text{...}$$ or \\times). Instead, format all equations and formulas (e.g. Molecular Formula = n × Empirical Formula, Hooke’s Law, etc.) using clean HTML: <div class="math-formula-box"><strong>Molecular Formula</strong> = <em>n</em> &times; <strong>(Empirical Formula)</strong></div>. Use HTML entities (&times;, &divide;, &plusmn;, &radic;, &rarr;) and tags (<sub>, <sup>) for subscripts and superscripts so they render cleanly in Google Blogger.
-  - SEO Meta Description (CRITICAL): Automatically generate an optimized 140-160 character SEO description (maximum 160 characters) that directly follows and complements the title. It must summarize the post with high-intent keywords, create a high click-through rate hook, and fit perfectly in search engine snippets and social meta tags.
-  ${userProvidedSeoDescription ? `- Custom user SEO focus/keywords: "${userProvidedSeoDescription}". Incorporate this into the SEO description.` : ''}
-  - Do NOT wrap the whole response in a markdown codeblock (\`\`\`html ... \`\`\`).
-${customPromptExtra ? `- Additional user instruction: ${customPromptExtra}` : ''}
-
-CRITICAL: Return the response strictly as valid JSON matching this structure:
-{
-  "title": "A catchy, SEO-friendly title without quotation marks",
-  "seoMetaDescription": "A 140-160 character SEO description that directly follows the title with target keywords (strict max 160 chars)",
-  "summary": "A 1-2 sentence meta description / summary of the post",
-  "htmlContent": "The complete, rich HTML body formatted for Blogger (without outer markdown backticks)",
-  "labels": ["tag1", "tag2", "tag3", "tag4"]
-}`;
-
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          systemInstruction:
-            'You are an expert technical writer and news editor for BytePulse News. Always output strictly valid JSON with title, summary, htmlContent, and labels.',
-        },
-      });
-
-      const text = response.text;
-      if (text && text.trim().length > 0) {
-        rawGeneratedText = text;
-        successfulAttempt = attempt;
-        const duration = Date.now() - attemptStart;
-        addLog({
-          attempt,
-          status: 'success',
-          message: `Successfully generated content using ${modelName} in ${(duration / 1000).toFixed(2)}s`,
-          durationMs: duration,
-        });
-        break;
-      } else {
-        throw new Error('Received empty text response from model.');
-      }
-    } catch (err: any) {
-      const duration = Date.now() - attemptStart;
-      const errorMsg = err?.message || String(err);
-      addLog({
-        attempt,
-        status: 'failed',
-        message: `Model ${modelName} - Attempt ${attempt} failed: ${errorMsg}`,
-        durationMs: duration,
-      });
-
-      if (attempt < maxRetries) {
-        const sleepTime = backoffFactor * attempt;
-        addLog({
-          attempt,
-          status: 'retry_wait',
-          message: `Backoff triggered: Waiting ${sleepTime}s before retry attempt ${attempt + 1}...`,
-          sleepTimeSeconds: sleepTime,
-        });
-        await sleep(sleepTime * 1000);
-      } else {
-        addLog({
-          attempt,
-          status: 'failed',
-          message: `Model ${modelName} reached maximum retries (${maxRetries}).`,
-        });
-      }
-    }
-  }
-
-  if (!rawGeneratedText) {
-    return res.status(503).json({
-      success: false,
-      error: 'Model is currently experiencing high demand or quota limits. Please try again later.',
-      logs,
-    });
-  }
-
-  try {
-    let parsed: any;
-    try {
-      parsed = JSON.parse(rawGeneratedText);
-    } catch {
-      // Fallback: sanitize unescaped LaTeX backslashes and remove code fences
-      const sanitized = sanitizeJsonWithLatex(rawGeneratedText);
-      parsed = JSON.parse(sanitized);
-    }
-
-    const title = parsed.title || (isNews ? `${newsOutlet} Breaking News Update` : isSindhBoard ? 'Sindh Board Complete Notes & Solutions' : 'BytePulse Update');
-    let htmlContent = parsed.htmlContent || `<p>${rawGeneratedText}</p>`;
-    const summary = parsed.summary || 'Comprehensive news report and bulletin.';
-    let seoMetaDescription = (parsed.seoMetaDescription || userProvidedSeoDescription || summary).trim();
-    if (seoMetaDescription.length > 160) {
-      seoMetaDescription = seoMetaDescription.slice(0, 157).trim() + '...';
-    }
-    let labels = Array.isArray(parsed.labels) ? parsed.labels : ['News', newsOutlet];
-
-    // Resolve any LaTeX math or chemical equations into clean Blogger-compatible HTML
-    htmlContent = renderMathFormulas(htmlContent);
-
-    // Determine featured image
-    let finalImageUrl = userProvidedImageUrl;
-    if (!finalImageUrl && includeImages !== false) {
-      finalImageUrl = getFeaturedImageUrl(
-        isNews ? 'news' : isSindhBoard ? 'sindh_board' : isHealthTopic ? 'health' : 'tech',
-        angle,
-        sindhBoardConfig?.subject
-      );
-    }
-
-    // Embed featured image at top if not already present in the HTML
-    if (finalImageUrl && includeImages !== false && !htmlContent.includes('<img')) {
-      const captionText = isNews
-        ? `${newsOutlet} • ${newsLanguage} News Desk Report`
-        : isSindhBoard
-        ? `Sindh Textbook Board (STBB Jamshoro) ${sindhBoardConfig?.classLevel ? `Class ${sindhBoardConfig.classLevel}` : ''} ${sindhBoardConfig?.subject || ''}`
-        : undefined;
-      const imageHtml = formatBloggerImageHtml(finalImageUrl, title, captionText);
-      htmlContent = `${imageHtml}\n${htmlContent}`;
-    }
-
-    // Auto-generate and inject Table of Contents if enabled
-    if (includeTableOfContents !== false) {
-      htmlContent = injectTableOfContents(htmlContent);
-    }
-
-    if (isNews) {
-      const extraLabels = ['News', newsOutlet];
-      if (newsLanguage !== 'English') extraLabels.push(newsLanguage);
-      labels = Array.from(new Set([...extraLabels, ...labels]));
-    } else if (isSindhBoard) {
-      const extraLabels = ['Sindh Board', 'STBB Jamshoro'];
-      if (sindhBoardConfig?.classLevel) extraLabels.push(`Class ${sindhBoardConfig.classLevel}`);
-      if (sindhBoardConfig?.subject) extraLabels.push(sindhBoardConfig.subject);
-      labels = Array.from(new Set([...extraLabels, ...labels]));
-    }
-
-    return res.json({
-      success: true,
+// --- Blogger Publish Helper ---
+async function publishToBlogger(
+  blogId: string,
+  accessToken: string,
+  title: string,
+  contentHtml: string,
+  labels: string[],
+  isDraft: boolean
+) {
+  const url = `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/?isDraft=${isDraft}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      kind: 'blogger#post',
+      blog: { id: blogId },
       title,
-      seoMetaDescription,
-      summary,
-      htmlContent,
+      content: contentHtml,
       labels,
-      imageUrl: finalImageUrl,
-      category: isNews ? 'news' : isSindhBoard ? 'sindh_board' : isHealthTopic ? 'health' : 'tech',
-      newsMeta: isNews ? {
-        outlet: newsOutlet,
-        language: newsLanguage,
-        newsType: newsConfig?.newsType || 'breaking',
-        isRTL,
-      } : undefined,
-      sindhBoardMeta: isSindhBoard && sindhBoardConfig ? {
-        classLevel: sindhBoardConfig.classLevel,
-        subject: sindhBoardConfig.subject,
-        medium: sindhBoardConfig.medium,
-        contentType: sindhBoardConfig.contentType,
-      } : undefined,
-      logs,
-      model: modelName,
-      successfulAttempt,
-      totalDurationMs: Date.now() - startTime,
-    });
-  } catch (parseError: any) {
-    // If JSON parsing fails, treat the raw text as content
-    const titleMatch = rawGeneratedText.match(/^#\s+(.*)$/m) || rawGeneratedText.match(/<h[12]>(.*?)<\/h[12]>/i);
-    const title = titleMatch ? titleMatch[1].trim() : (isNews ? `${newsOutlet} Update` : isSindhBoard ? 'Sindh Board Notes & Solutions' : 'BytePulse Update');
-    
-    let fallbackHtml = `<p>${rawGeneratedText.replace(/\n\n/g, '</p><p>')}</p>`;
-    fallbackHtml = renderMathFormulas(fallbackHtml);
-    let fallbackImageUrl = userProvidedImageUrl || getFeaturedImageUrl(isNews ? 'news' : isSindhBoard ? 'sindh_board' : isHealthTopic ? 'health' : 'tech', angle);
-    if (fallbackImageUrl && includeImages !== false && !fallbackHtml.includes('<img')) {
-      fallbackHtml = `${formatBloggerImageHtml(fallbackImageUrl, title)}\n${fallbackHtml}`;
-    }
-    if (includeTableOfContents !== false) {
-      fallbackHtml = injectTableOfContents(fallbackHtml);
-    }
-
-    let fallbackSeoDesc = (userProvidedSeoDescription || (title ? `${title.slice(0, 120)} - Complete report, updates and bulletin.` : 'Comprehensive news update and bulletin.')).trim();
-    if (fallbackSeoDesc.length > 160) {
-      fallbackSeoDesc = fallbackSeoDesc.slice(0, 157).trim() + '...';
-    }
-
-    return res.json({
-      success: true,
-      title,
-      seoMetaDescription: fallbackSeoDesc,
-      summary: 'Generated by BytePulse AI',
-      htmlContent: fallbackHtml,
-      labels: isNews ? ['News', newsOutlet, newsLanguage] : isSindhBoard ? ['Sindh Board', 'STBB', 'Education'] : ['BytePulse', 'News'],
-      imageUrl: fallbackImageUrl,
-      category: isNews ? 'news' : isSindhBoard ? 'sindh_board' : isHealthTopic ? 'health' : 'tech',
-      newsMeta: isNews ? {
-        outlet: newsOutlet,
-        language: newsLanguage,
-        newsType: newsConfig?.newsType || 'breaking',
-        isRTL,
-      } : undefined,
-      logs,
-      model: modelName,
-      successfulAttempt,
-      totalDurationMs: Date.now() - startTime,
-    });
-  }
-});
-
-// API: Publish to Google Blogger
-app.post('/api/publish-blogger', async (req, res) => {
-  const {
-    blogId = process.env.BLOG_ID,
-    title,
-    content,
-    labels = [],
-    isDraft = false,
-    accessToken: clientAccessToken,
-    refreshToken = process.env.REFRESH_TOKEN,
-    clientId = process.env.CLIENT_ID,
-    clientSecret = process.env.CLIENT_SECRET,
-  } = req.body;
-
-  if (!title || !content) {
-    return res.status(400).json({
-      success: false,
-      error: 'Title and content are required for publishing.',
-    });
-  }
-
-  const targetBlogId = blogId || process.env.BLOG_ID;
-
-  // Attempt to acquire an OAuth access token
-  let effectiveToken = clientAccessToken;
-
-  try {
-    if (!effectiveToken && refreshToken && clientId && clientSecret) {
-      effectiveToken = await getAccessTokenFromRefreshToken(clientId, clientSecret, refreshToken);
-    }
-
-    // If an effective access token and targetBlogId exist, make the real Blogger API call
-    if (effectiveToken && targetBlogId) {
-      const url = new URL(`https://www.googleapis.com/blogger/v3/blogs/${targetBlogId}/posts`);
-      if (isDraft) {
-        url.searchParams.set('isDraft', 'true');
-      }
-
-      const bodyPayload = {
-        kind: 'blogger#post',
-        title,
-        content,
-        labels: Array.isArray(labels) ? labels : [],
-      };
-
-      const bloggerResponse = await fetch(url.toString(), {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${effectiveToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bodyPayload),
-      });
-
-      if (!bloggerResponse.ok) {
-        const errorText = await bloggerResponse.text();
-        return res.status(bloggerResponse.status).json({
-          success: false,
-          error: `Google Blogger API error (${bloggerResponse.status}): ${errorText}`,
-          liveApiAttempted: true,
-        });
-      }
-
-      const bloggerResult = (await bloggerResponse.json()) as any;
-      return res.json({
-        success: true,
-        isSandbox: false,
-        url: bloggerResult.url,
-        postId: bloggerResult.id,
-        title: bloggerResult.title,
-        published: bloggerResult.published,
-        status: isDraft ? 'DRAFT' : 'LIVE',
-        message: isDraft
-          ? 'Draft successfully saved to Google Blogger!'
-          : 'Post published successfully to Google Blogger!',
-      });
-    }
-
-    // If no live credentials are provided or user is testing, provide a clean simulated Blogger publish response
-    const slug = title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/(^-|-$)/g, '');
-    const simulatedBlog = targetBlogId ? `blog-${targetBlogId}` : 'bytepulse-updates';
-    const simulatedUrl = `https://${simulatedBlog}.blogspot.com/${new Date().getFullYear()}/${String(
-      new Date().getMonth() + 1
-    ).padStart(2, '0')}/${slug}.html`;
-
-    return res.json({
-      success: true,
-      isSandbox: true,
-      url: simulatedUrl,
-      postId: 'sim-' + Date.now().toString(),
-      title,
-      status: isDraft ? 'DRAFT (Simulated)' : 'PUBLISHED (Simulated)',
-      message: `Verified Blogger payload formatted successfully! To send directly to your live Blogger blog, provide your BLOG_ID and Google OAuth token in Settings or environment variables.`,
-      previewPayload: {
-        blogId: targetBlogId || 'NOT_SET',
-        isDraft,
-        title,
-        labels,
-        contentLength: content.length,
-      },
-    });
-  } catch (err: any) {
-    return res.status(500).json({
-      success: false,
-      error: `Failed to publish to Blogger: ${err?.message || String(err)}`,
-    });
-  }
-});
-
-// Setup Vite middleware in dev or static files in production
-async function startServer() {
-  const isProduction = process.env.NODE_ENV === 'production';
-
-  if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.resolve(distPath, 'index.html'));
-    });
-  }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`BytePulse Studio server running at http://0.0.0.0:${PORT}`);
+    }),
   });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Blogger API Error ${res.status}: ${data.error?.message || res.statusText}`);
+  }
+  return data;
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+// --- Helper: HTTP Fetch with Retry Logic (Manual fetch wrapper for Gemini, using global fetch) ---
+async function callGeminiWithRetries(
+  systemPrompt: string,
+  userPrompt: string,
+  maxRetries: number,
+  backoffFactor: number
+): Promise<{ text: string; logs: string[] }> {
+  const logs: string[] = [];
+  const url = getGeminiApiUrl(GEMINI_MODEL);
+  logs.push(`[INIT] Model: ${GEMINI_MODEL} (${url})`);
+  logs.push(`[INIT] User: prompt length ${userPrompt.length} chars, System: ${systemPrompt.length} chars`);
+
+  const payload = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ parts: [{ text: userPrompt }] }],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 8192,
+      topK: 40,
+      topP: 0.95,
+    },
+  };
+
+  let attempt = 0;
+  let lastError = '';
+
+  while (attempt < maxRetries) {
+    attempt++;
+    logs.push(`[Attempt ${attempt}/${maxRetries}] Calling Gemini...`);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        let errText = `HTTP ${response.status}`;
+        try {
+          const errData = await response.json();
+          if (errData.error && errData.error.message) errText = errData.error.message;
+        } catch (e) {
+          /* ignore */
+        }
+        lastError = errText;
+
+        // Handle rate limit (429) / overloaded (503) / service unavailable (500) with exponential backoff
+        if (response.status === 429 || response.status === 503 || response.status === 500) {
+          const waitSeconds = backoffFactor * attempt;
+          logs.push(`[Attempt ${attempt}/${maxRetries}] FAILED: ${errText} (HTTP ${response.status}). Backing off for ${waitSeconds}s...`);
+          if (attempt < maxRetries) {
+            await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+            continue;
+          }
+        } else {
+          logs.push(`[Attempt ${attempt}/${maxRetries}] FAILED: ${errText} (Non-retryable)`);
+          break;
+        }
+      } else {
+        const data = await response.json();
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+        if (!rawText) {
+          lastError = 'Empty response from Gemini';
+          logs.push(`[Attempt ${attempt}/${maxRetries}] FAILED: Empty response. Retrying...`);
+          const waitSeconds = backoffFactor * attempt;
+          if (attempt < maxRetries) {
+            await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+            continue;
+          }
+        } else {
+          logs.push(`[Attempt ${attempt}/${maxRetries}] SUCCESS: Generated ${rawText.length} chars.`);
+          return { text: rawText, logs };
+        }
+      }
+    } catch (error: any) {
+      lastError = error.message || String(error);
+      logs.push(`[Attempt ${attempt}/${maxRetries}] NETWORK ERROR: ${lastError}`);
+      const waitSeconds = backoffFactor * attempt;
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+        continue;
+      }
+    }
+  }
+
+  throw new Error(`Gemini failed after ${maxRetries} attempts. Last error: ${lastError}`);
+}
+
+// --- Prompt Builder: Sindh Board education notes ---
+function buildArticlePrompt(config: GenerationConfig): { systemPrompt: string; userPrompt: string } {
+  const sb = config.sindhBoardConfig;
+  const sbLabel = sb
+    ? `Sindh Board Class ${sb.classLevel} ${sb.subject}${sb.stream ? ` (${sb.stream})` : ''} - ${sb.chapterOrTopic}`
+    : 'Sindh Board Notes';
+
+  const mediumNote =
+    sb?.medium === 'Urdu'
+      ? `Medium: URDU. All headings, notes and explanations must be written in clear Urdu (اردو), using simple and easy language for students. Keep key terms in English in brackets where helpful.`
+      : sb?.medium === 'Sindhi'
+      ? `Medium: SINDHI. All headings, notes and explanations must be written in clear Sindhi (سنڌي), using simple and easy language for students. Keep key terms in English in brackets where helpful.`
+      : `Medium: ENGLISH. All headings, notes and explanations must be written in clear, simple English for students.`;
+
+  const contentTypeNote =
+    sb?.contentType === 'solved_exercises'
+      ? `CONTENT FORMAT: SOLVED TEXTBOOK EXERCISES. Write step-by-step solutions for the textbook exercise questions of this chapter, including all numerical problems with full working, formulas and final answers. Add a short theory recap before each section and a "Board Exam Tips" box at the end.`
+      : sb?.contentType === 'mcqs'
+      ? `CONTENT FORMAT: SOLVED MCQs. Write at least 20 high-yield multiple choice questions from this chapter with 4 options each, the correct answer marked, and a 1-line reason for each answer. End with a quick revision summary and exam tips.`
+      : sb?.contentType === 'model_paper'
+      ? `CONTENT FORMAT: MODEL PAPER. Create a complete Board Exam model paper for this chapter/subject: Section A (MCQs), Section B (short questions) and Section C (long questions), with marks distribution, time allowed, and a solved answer key / marking scheme at the end.`
+      : sb?.contentType === 'book_summary'
+      ? `CONTENT FORMAT: TEXTBOOK SUMMARY & GUIDE. Write a complete chapter summary of this textbook chapter: key concepts, important definitions, formulas, diagrams explained in words, important questions list, and a revision checklist.`
+      : `CONTENT FORMAT: COMPLETE CHAPTER NOTES. Write full chapter notes: introduction, all key concepts explained simply, important definitions, formulas with examples, solved numericals where relevant, diagrams explained in words, and a summary table at the end.`;
+
+  const systemPrompt = `You are a professional Pakistani education content writer and Sindh Board (STBB Jamshoro / BSEK / BIEK) curriculum expert.
+
+You write original, accurate, exam-focused study material for students of Class 1 to 12 in Pakistan. Your notes follow the Sindh Textbook Board syllabus exactly, use simple student-friendly language, and are structured for board exam preparation (short questions, long questions, MCQs and numericals).
+
+CRITICAL RULES:
+1. NEVER invent fake textbook page numbers or claim to quote the textbook verbatim — write original explanations in your own words.
+2. All science, maths and facts must be correct and syllabus-accurate for the stated class and subject.
+3. Keep the tone educational and encouraging. Use headings, bullet points and tables for readability.
+4. Structure the output as clean HTML: <h2>, <h3>, <p>, <ul>, <ol>, <table>, <strong>, <blockquote> are allowed. Do NOT wrap the whole output in markdown code fences.`;
+
+  const userPrompt = `TOPIC / CHAPTER:
+${sbLabel}
+${config.angle}
+
+${mediumNote}
+
+${contentTypeNote}
+
+TARGET WORD COUNT: approximately ${config.targetWordCount} words.
+
+ADDITIONAL INSTRUCTION: ${config.customPromptExtra || 'Follow the Sindh Board syllabus and keep everything exam-focused.'}
+
+STRUCTURE REQUIREMENTS:
+- Start with the title and a short introduction of the chapter/topic.
+${config.includeTableOfContents ? '- After the introduction, include a Table of Contents listing the main sections.\n' : ''}- Use clear section headings (h2/h3) for every concept.
+- Include solved examples / numericals where the subject needs them.
+- End with a summary of key points.
+${config.includeKeyTakeaways ? '- End with a "Board Exam Golden Tips & FAQ" box: 5 golden tips and 5 frequently asked exam questions with short answers.\n' : ''}- Close with 5 SEO tags on a separate line starting with "TAGS:".
+
+SEO META DESCRIPTION:
+${
+    config.seoMetaDescription
+      ? `Use exactly this meta description (max 160 characters): "${config.seoMetaDescription}"`
+      : `Write a compelling SEO meta description (max 160 characters, following the title) for this study material. Put it on a separate line starting with "META:"`
+}
+
+OUTPUT FORMAT (strict):
+- First line: the article title (plain text, no HTML tags).
+- Then the full article body as clean HTML.
+- Then a line starting with "META:" followed by the meta description.
+- Then a line starting with "TAGS:" followed by 5 comma-separated tags.
+- Do NOT include any markdown fences, JSON, or commentary outside this structure.`;
+
+  return { systemPrompt, userPrompt };
+}
+
+// --- Helper: Parse title, summary, tags, meta description from AI output ---
+function parseTitleSummaryTags(rawText: string) {
+  // Clean markdown fences if present
+  let text = rawText.replace(/^```html\s*/i, '').replace(/```$/m, '').trim();
+
+  const lines = text.split('\n');
+  let title = 'Sindh Board Notes';
+  let metaDescription = '';
+  let tags: string[] = [];
+  const bodyLines: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (i === 0 && line && !line.startsWith('<') && !line.toUpperCase().startsWith('META:') && !line.toUpperCase().startsWith('TAGS:')) {
+      title = line.replace(/^#+\s*/, '').replace(/^\*+/, '').replace(/\*+$/, '').trim();
+      continue;
+    }
+    if (line.toUpperCase().startsWith('META:')) {
+      metaDescription = line.slice(5).trim();
+      continue;
+    }
+    if (line.toUpperCase().startsWith('TAGS:')) {
+      const tagStr = line.slice(5).trim();
+      tags = tagStr.split(',').map((t) => t.trim()).filter((t) => t.length > 0).slice(0, 5);
+      continue;
+    }
+    bodyLines.push(lines[i]);
+  }
+
+  let htmlContent = bodyLines.join('\n').trim();
+
+  // Extract a short summary: first paragraph text (strip HTML)
+  let summary = '';
+  const pMatch = htmlContent.match(/<p[^>]*>(.*?)<\/p>/is);
+  if (pMatch) {
+    summary = pMatch[1].replace(/<[^>]+>/g, '').trim().slice(0, 200);
+  }
+  if (!summary) {
+    summary = htmlContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+  }
+
+  if (!metaDescription) {
+    metaDescription = summary.slice(0, 157);
+  }
+
+  return { title, htmlContent, summary, tags, metaDescription };
+}
+
+// --- Config endpoint ---
+app.get('/api/config', (req, res) => {
+  res.json({
+    geminiConfigured: Boolean(GEMINI_API_KEY),
+    model: GEMINI_MODEL,
+    hasLiveCreds: Boolean(DEFAULT_BLOGGER_ACCESS_TOKEN || DEFAULT_BLOGGER_REFRESH_TOKEN),
+    blogId: DEFAULT_BLOGGER_BLOG_ID || null,
+  });
+});
+
+// --- Generate Education Article endpoint ---
+app.post('/api/generate-education-article', async (req, res) => {
+  const config: GenerationConfig = req.body.config || req.body;
+  const logs: string[] = [];
+
+  if (!GEMINI_API_KEY) {
+    return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on the server. Please set it in your .env file.' });
+  }
+
+  if (!config || !config.angle || config.angle.trim() === '') {
+    return res.status(400).json({ success: false, error: 'Missing topic / chapter angle in config.' });
+  }
+
+  try {
+    logs.push(`[START] Education article generation requested. Class: ${config.sindhBoardConfig?.classLevel || 'N/A'}, Subject: ${config.sindhBoardConfig?.subject || 'N/A'}`);
+
+    // Build prompts
+    const { systemPrompt, userPrompt } = buildArticlePrompt(config);
+
+    // Call Gemini with retries
+    const { text: rawText, logs: geminiLogs } = await callGeminiWithRetries(
+      systemPrompt,
+      userPrompt,
+      config.maxRetries || 5,
+      config.backoffFactor || 4
+    );
+    logs.push(...geminiLogs);
+
+    // Parse output
+    const { title, htmlContent, summary, tags, metaDescription } = parseTitleSummaryTags(rawText);
+    logs.push(`[PARSE] Title: "${title}", Tags: ${tags.join(', ') || 'none'}, Meta: ${metaDescription.slice(0, 60)}...`);
+
+    // Featured image (auto-detect if not supplied)
+    let imageUrl = config.imageUrl;
+    if (config.includeImages && !imageUrl) {
+      const angleLower = config.angle.toLowerCase();
+      const subjectLower = (config.sindhBoardConfig?.subject || '').toLowerCase();
+      if (subjectLower.includes('physics') || angleLower.includes('physics')) {
+        imageUrl = 'https://images.unsplash.com/photo-1636466497217-26a8cbeaf0aa?auto=format&fit=crop&w=1200&q=80';
+      } else if (subjectLower.includes('chemistry') || angleLower.includes('chemistry')) {
+        imageUrl = 'https://images.unsplash.com/photo-1532187863486-abf9dbad1b69?auto=format&fit=crop&w=1200&q=80';
+      } else if (subjectLower.includes('biology') || angleLower.includes('biology')) {
+        imageUrl = 'https://images.unsplash.com/photo-1530026405186-ed1f139313f8?auto=format&fit=crop&w=1200&q=80';
+      } else if (subjectLower.includes('math') || angleLower.includes('math')) {
+        imageUrl = 'https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=1200&q=80';
+      } else if (subjectLower.includes('computer') || angleLower.includes('computer')) {
+        imageUrl = 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=1200&q=80';
+      } else {
+        imageUrl = 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80';
+      }
+    }
+
+    const article = {
+      id: crypto.randomUUID(),
+      title,
+      summary,
+      htmlContent,
+      tags,
+      metaDescription,
+      category: 'sindh_board',
+      createdAt: new Date().toISOString(),
+      wordCount: htmlContent.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length,
+      imageUrl: config.includeImages ? imageUrl : undefined,
+      sindhBoardMeta: config.sindhBoardConfig
+        ? {
+            classLevel: config.sindhBoardConfig.classLevel,
+            subject: config.sindhBoardConfig.subject,
+            stream: config.sindhBoardConfig.stream,
+            contentType: config.sindhBoardConfig.contentType,
+            medium: config.sindhBoardConfig.medium,
+            chapterOrTopic: config.sindhBoardConfig.chapterOrTopic,
+          }
+        : undefined,
+    };
+
+    logs.push(`[DONE] Article "${title}" generated (${article.wordCount} words).`);
+    res.json({ success: true, article, logs });
+  } catch (error: any) {
+    console.error('Generate error:', error);
+    logs.push(`[ERROR] ${error.message}`);
+    res.status(500).json({ success: false, error: error.message || 'Failed to generate education article', logs });
+  }
+});
+
+// --- Publish to Blogger endpoint ---
+app.post('/api/publish-blogger', async (req, res) => {
+  const { article, settings, isDraft } = req.body;
+
+  if (!article || !article.title || !article.htmlContent) {
+    return res.status(400).json({ success: false, error: 'Invalid article payload.' });
+  }
+
+  const blogId = settings.blogId || DEFAULT_BLOGGER_BLOG_ID;
+  if (!blogId) {
+    return res.status(400).json({ success: false, error: 'Blogger Blog ID is missing. Please set it in Settings.' });
+  }
+
+  try {
+    let accessToken = settings.accessToken || DEFAULT_BLOGGER_ACCESS_TOKEN;
+
+    // Refresh token flow
+    if (!accessToken) {
+      const clientId = settings.clientId || DEFAULT_BLOGGER_CLIENT_ID;
+      const clientSecret = settings.clientSecret || DEFAULT_BLOGGER_CLIENT_SECRET;
+      const refreshToken = settings.refreshToken || DEFAULT_BLOGGER_REFRESH_TOKEN;
+
+      if (!clientId || !clientSecret || !refreshToken) {
+        return res.status(400).json({
+          success: false,
+          error: 'No Blogger access token or OAuth refresh credentials found. Please add an Access Token or OAuth Client Credentials in Settings.',
+        });
+      }
+      accessToken = await refreshBloggerToken(clientId, clientSecret, refreshToken);
+    }
+
+    // Build full HTML content: featured image + body + meta description note
+    let fullContent = article.htmlContent || '';
+    if (article.imageUrl) {
+      const imageHtml = `<div class="separator" style="clear: both; text-align: center; margin: 1.5rem 0 2rem 0;"><a href="${article.imageUrl}" style="margin-left: 1em; margin-right: 1em;" target="_blank"><img border="0" data-original-height="800" data-original-width="1200" src="${article.imageUrl}" alt="${article.title.replace(/"/g, '&quot;')}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); object-fit: cover; max-height: 480px; width: 100%;" /></a></div>`;
+      fullContent = imageHtml + fullContent;
+    }
+
+    const labels = [...(article.tags || [])];
+    if (article.sindhBoardMeta) {
+      labels.push(`Class ${article.sindhBoardMeta.classLevel}`);
+      labels.push(article.sindhBoardMeta.subject);
+      labels.push('Sindh Board');
+    }
+
+    const result = await publishToBlogger(
+      blogId,
+      accessToken,
+      article.title,
+      fullContent,
+      labels.slice(0, 20),
+      Boolean(isDraft)
+    );
+
+    res.json({
+      success: true,
+      url: result.url,
+      id: result.id,
+      message: isDraft ? 'Post saved as draft on Blogger.' : 'Post published live on Blogger!',
+    });
+  } catch (error: any) {
+    console.error('Publish error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to publish to Blogger' });
+  }
+});
+
+// --- Health check ---
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', model: GEMINI_MODEL, geminiConfigured: Boolean(GEMINI_API_KEY) });
+});
+
+app.listen(PORT, () => {
+  console.log(`Shizcon Education Studio server running on http://localhost:${PORT}`);
+  console.log(`Gemini model: ${GEMINI_MODEL} | Configured: ${Boolean(GEMINI_API_KEY)}`);
 });
