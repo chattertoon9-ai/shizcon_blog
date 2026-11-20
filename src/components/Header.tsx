@@ -1,10 +1,10 @@
 import React from 'react';
-import { Newspaper, Sparkles, Terminal, Settings, History, Send, ExternalLink, CheckCircle2, AlertCircle } from 'lucide-react';
+import { GraduationCap, Sparkles, Settings, History, Send, ExternalLink, CheckCircle2, AlertCircle } from 'lucide-react';
 import { BloggerSettings } from '../types';
 
 interface HeaderProps {
-  activeView: 'studio' | 'history' | 'python' | 'settings';
-  setActiveView: (view: 'studio' | 'history' | 'python' | 'settings') => void;
+  activeView: 'studio' | 'history' | 'settings';
+  setActiveView: (view: 'studio' | 'history' | 'settings') => void;
   bloggerSettings: BloggerSettings;
   historyCount: number;
   isGenerating: boolean;
@@ -33,12 +33,12 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Brand */}
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 via-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20 ring-1 ring-white/20">
-            <Newspaper className="w-5 h-5 text-white" />
+            <GraduationCap className="w-5 h-5 text-white" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <span className="font-extrabold text-lg text-white tracking-tight flex items-center gap-1.5">
-                BytePulse <span className="text-cyan-400 font-light">Studio</span>
+                Shizcon <span className="text-cyan-400 font-light">Education Studio</span>
               </span>
               <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 flex items-center gap-1">
                 <Sparkles className="w-3 h-3 text-cyan-400" />
@@ -46,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 hidden sm:block">
-              Sindh Board Class 1–12 Books & Notes • Health Tips & Tech Studio • Google Blogger Publisher
+              Sindh Board Class 1–12 Books & Notes • Google Blogger Publisher
             </p>
           </div>
         </div>
@@ -64,7 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              Generator Studio
+              Education Studio
             </button>
 
             <button
@@ -82,18 +82,6 @@ export const Header: React.FC<HeaderProps> = ({
                   {historyCount}
                 </span>
               )}
-            </button>
-
-            <button
-              onClick={() => setActiveView('python')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                activeView === 'python'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-              }`}
-            >
-              <Terminal className="w-3.5 h-3.5" />
-              Python Script
             </button>
 
             <button
