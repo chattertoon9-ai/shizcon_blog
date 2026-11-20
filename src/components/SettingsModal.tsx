@@ -38,8 +38,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           blogId: localSettings.blogId,
-          title: 'BytePulse Connection Test',
-          content: '<p>Testing Google Blogger API connection from BytePulse Studio.</p>',
+          title: 'Shizcon Connection Test',
+          content: '<p>Testing Google Blogger API connection from Shizcon Education Studio.</p>',
           isDraft: true,
           accessToken: localSettings.accessToken,
           clientId: localSettings.clientId,
@@ -160,7 +160,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Authentication Mode 2: Full Python-style OAuth Creds */}
         <div className="pt-2 border-t border-slate-800/80">
           <label className="text-xs font-semibold text-slate-200 block mb-1">
-            Option B: OAuth Client Credentials & Refresh Token (Matches Python Script)
+            Option B: OAuth Client Credentials & Refresh Token
           </label>
 
           <div className="space-y-2 mt-2">
@@ -198,7 +198,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
           <p className="text-[10px] text-slate-500 mt-1.5">
-            If left blank, BytePulse operates in Sandbox/Preview mode, creating realistic previews and verified payloads.
+            If left blank, Shizcon Education Studio operates in Sandbox/Preview mode, creating realistic previews and verified payloads.
           </p>
         </div>
 
