@@ -16,29 +16,18 @@ export interface SindhBoardConfig {
   chapterOrTopic: string;
 }
 
-export type NewsLanguage = 'English' | 'Urdu' | 'Sindhi' | 'Arabic';
-
-export interface NewsConfig {
-  outlet: string; // 'Dawn', 'The News', 'Aaj News', 'Sindh TV News', 'KTN News', 'Kawish / Awami Awaz', 'Geo News', 'Al Jazeera', etc.
-  language: NewsLanguage;
-  newsType: 'breaking' | 'bulletin' | 'in_depth_report' | 'editorial' | 'regional_sindh';
-  datelineCity?: string; // 'Karachi', 'Islamabad', 'Hyderabad', 'Sukkur', 'Lahore', 'Dubai', 'Riyadh', etc.
-}
-
 export interface GenerationConfig {
   angle: string;
-  category: 'news' | 'sindh_board' | 'health' | 'tech' | 'longevity';
-  tone: 'engaging' | 'informative' | 'technical' | 'authoritative' | 'practical' | 'empathetic' | 'evidence-based' | 'educational';
+  category: 'sindh_board';
+  tone: 'educational' | 'authoritative' | 'practical' | 'engaging';
   targetWordCount: number;
   includeKeyTakeaways: boolean;
   includeCodeExample: boolean;
-  includeHealthDisclaimer: boolean;
   includeImages: boolean;
   includeTableOfContents: boolean;
   seoMetaDescription?: string;
   imageUrl?: string;
   sindhBoardConfig?: SindhBoardConfig;
-  newsConfig?: NewsConfig;
   customPromptExtra: string;
   maxRetries: number;
   backoffFactor: number;
@@ -55,18 +44,12 @@ export interface GeneratedArticle {
   model: string;
   createdAt: string;
   angle: string;
-  category?: 'news' | 'sindh_board' | 'health' | 'tech' | 'longevity';
+  category?: 'sindh_board';
   sindhBoardMeta?: {
     classLevel: string;
     subject: string;
     medium: string;
     contentType: string;
-  };
-  newsMeta?: {
-    outlet: string;
-    language: NewsLanguage;
-    newsType: string;
-    isRTL: boolean;
   };
   successfulAttempt: number;
   totalDurationMs: number;
